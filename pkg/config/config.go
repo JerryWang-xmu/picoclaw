@@ -2010,6 +2010,11 @@ func (c *Config) ValidateModelList() error {
 
 func (c *Config) SecurityCopyFrom(cfg *Config) {
 	c.security = cfg.security
+	if c.security != nil {
+		if err := applySecurityConfig(c, c.security); err != nil {
+			logger.Errorf("failed to apply security config in SecurityCopyFrom: %v", err)
+		}
+	}
 }
 
 func MergeAPIKeys(apiKey string, apiKeys []string) []string {
