@@ -209,6 +209,15 @@ func validateConfig(cfg *config.Config) []string {
 		errs = append(errs, "channels.discord.token is required when discord channel is enabled")
 	}
 
+	if cfg.Channels.WeCom.Enabled {
+		if cfg.Channels.WeCom.BotID == "" {
+			errs = append(errs, "channels.wecom.bot_id is required when wecom channel is enabled")
+		}
+		if cfg.Channels.WeCom.Secret() == "" {
+			errs = append(errs, "channels.wecom.secret is required when wecom channel is enabled")
+		}
+	}
+
 	if cfg.Tools.Exec.Enabled {
 		if cfg.Tools.Exec.EnableDenyPatterns {
 			errs = append(
