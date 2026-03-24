@@ -60,8 +60,8 @@ type AgentLoop struct {
 	mu             sync.RWMutex
 
 	// Concurrent turn management (from HEAD)
-	activeTurnStates sync.Map     // key: sessionKey (string), value: *turnState
-	subTurnCounter   atomic.Int64 // Counter for generating unique SubTurn IDs
+	activeTurnStates *shardedTurnStateMap // key: sessionKey (string), value: *turnState
+	subTurnCounter   atomic.Int64         // Counter for generating unique SubTurn IDs
 
 	// Turn tracking (from Incoming)
 	turnSeq        atomic.Uint64
@@ -126,15 +126,16 @@ func NewAgentLoop(
 
 	eventBus := NewEventBus()
 	al := &AgentLoop{
-		bus:         msgBus,
-		cfg:         cfg,
-		registry:    registry,
-		state:       stateManager,
-		eventBus:    eventBus,
-		summarizing: sync.Map{},
-		fallback:    fallbackChain,
-		cmdRegistry: commands.NewRegistry(commands.BuiltinDefinitions()),
-		steering:    newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
+		bus:              msgBus,
+		cfg:              cfg,
+		registry:         registry,
+		state:            stateManager,
+		eventBus:         eventBus,
+		summarizing:      sync.Map{},
+		fallback:         fallbackChain,
+		cmdRegistry:      commands.NewRegistry(commands.BuiltinDefinitions()),
+		steering:         newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
+		activeTurnStates: newShardedTurnStateMap(),
 	}
 	al.hooks = NewHookManager(eventBus)
 	configureHookManagerFromConfig(al.hooks, cfg)
@@ -1712,7 +1713,7 @@ turnLoop:
 		}
 
 		// Check if parent turn has ended (SubTurn support from HEAD)
-		if ts.parentTurnState != nil && ts.IsParentEnded() {
+		if ts.parent != nil && ts.IsParentEnded() {
 			if !ts.critical {
 				logger.InfoCF("agent", "Parent turn ended, non-critical SubTurn exiting gracefully", map[string]any{
 					"agent_id":  ts.agentID,
@@ -2684,7 +2685,10 @@ func (al *AgentLoop) selectCandidates(
 }
 
 // maybeSummarize triggers summarization if the session history exceeds thresholds.
-func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey string, turnScope turnEventScope) {
+func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey string, turnScope *turnEventScope) {
+	if turnScope == nil {
+		return
+	}
 	newHistory := agent.Sessions.GetHistory(sessionKey)
 	tokenEstimate := al.estimateTokens(newHistory)
 	threshold := agent.ContextWindow * agent.SummarizeTokenPercent / 100
@@ -2871,7 +2875,10 @@ func formatToolsForLog(toolDefs []providers.ToolDefinition) string {
 }
 
 // summarizeSession summarizes the conversation history for a session.
-func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string, turnScope turnEventScope) {
+func (al *AgentLoop) summarizeSession(agent *AgentInstance, sessionKey string, turnScope *turnEventScope) {
+	if turnScope == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
@@ -3251,7 +3258,7 @@ func (al *AgentLoop) buildCommandsRuntime(agent *AgentInstance, opts *processOpt
 	return rt
 }
 
-func activeSkillNames(agent *AgentInstance, opts processOptions) []string {
+func activeSkillNames(agent *AgentInstance, opts *processOptions) []string {
 	var out []string
 	seen := make(map[string]struct{})
 
@@ -3272,7 +3279,9 @@ func activeSkillNames(agent *AgentInstance, opts processOptions) []string {
 	if agent != nil {
 		appendNames(agent.SkillsFilter)
 	}
-	appendNames(opts.ForcedSkills)
+	if opts != nil {
+		appendNames(opts.ForcedSkills)
+	}
 
 	return out
 }

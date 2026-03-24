@@ -303,7 +303,7 @@ func spawnSubTurn(
 	}
 
 	// 1. Depth limit check
-	if parentTS.depth >= rtCfg.maxDepth {
+	if parentTS.depth >= int32(rtCfg.maxDepth) {
 		logger.WarnCF("subturn", "Depth limit exceeded", map[string]any{
 			"parent_id": parentTS.turnID,
 			"depth":     parentTS.depth,
@@ -355,8 +355,8 @@ func spawnSubTurn(
 		SessionKey:              childID,
 		Channel:                 parentTS.channel,
 		ChatID:                  parentTS.chatID,
-		SenderID:                parentTS.opts.SenderID,
-		SenderDisplayName:       parentTS.opts.SenderDisplayName,
+		SenderID:                "",
+		SenderDisplayName:       "",
 		UserMessage:             cfg.SystemPrompt, // Task description becomes the first user message
 		SystemPromptOverride:    cfg.ActualSystemPrompt,
 		Media:                   nil,
@@ -366,6 +366,10 @@ func spawnSubTurn(
 		SendResponse:            false,
 		NoHistory:               true, // SubTurns don't use session history
 		SkipInitialSteeringPoll: true,
+	}
+	if parentTS.opts != nil {
+		opts.SenderID = parentTS.opts.SenderID
+		opts.SenderDisplayName = parentTS.opts.SenderDisplayName
 	}
 
 	// Create event scope for the child turn
@@ -379,7 +383,7 @@ func spawnSubTurn(
 	childTS.critical = cfg.Critical
 	childTS.depth = parentTS.depth + 1
 	childTS.parentTurnID = parentTS.turnID
-	childTS.parentTurnState = parentTS
+	childTS.parent = parentTS
 	childTS.pendingResults = make(chan *tools.ToolResult, 16)
 	childTS.concurrencySem = make(chan struct{}, rtCfg.maxConcurrent)
 	childTS.al = al                  // back-ref for hard abort cascade

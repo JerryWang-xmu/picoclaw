@@ -388,12 +388,14 @@ func (s *JSONLStore) addMsg(sessionKey string, msg providers.Message) error {
 	l.Lock()
 	defer l.Unlock()
 
-	// Append the message as a single JSON line.
-	line, err := json.Marshal(msg)
-	if err != nil {
+	// Serialize message using pooled buffer for zero-allocation encoding.
+	buf := GetBuffer()
+	enc := json.NewEncoder(buf)
+	if err := enc.Encode(msg); err != nil {
+		PutBuffer(buf)
 		return fmt.Errorf("memory: marshal message: %w", err)
 	}
-	line = append(line, '\n')
+	line := buf.Bytes()
 
 	// Handle Always mode - immediate write
 	if s.syncMode == SyncModeAlways {
@@ -403,20 +405,27 @@ func (s *JSONLStore) addMsg(sessionKey string, msg providers.Message) error {
 			0o644,
 		)
 		if err != nil {
+			PutBuffer(buf)
 			return fmt.Errorf("memory: open jsonl for append: %w", err)
 		}
 		_, writeErr := f.Write(line)
 		if writeErr != nil {
 			f.Close()
+			PutBuffer(buf)
 			return fmt.Errorf("memory: append message: %w", writeErr)
 		}
 		if syncErr := f.Sync(); syncErr != nil {
 			f.Close()
+			PutBuffer(buf)
 			return fmt.Errorf("memory: sync jsonl: %w", syncErr)
 		}
 		if closeErr := f.Close(); closeErr != nil {
+			PutBuffer(buf)
 			return fmt.Errorf("memory: close jsonl: %w", closeErr)
 		}
+
+		// Return buffer to pool after use
+		PutBuffer(buf)
 
 		// Update metadata for single message
 		meta, err := s.readMeta(sessionKey)
@@ -434,13 +443,16 @@ func (s *JSONLStore) addMsg(sessionKey string, msg providers.Message) error {
 	}
 
 	// Handle Periodic and OnClose modes with buffering
-	buf := s.getBuffer(sessionKey)
-	buf.buf.Write(line)
-	buf.count++
+	sessionBuf := s.getBuffer(sessionKey)
+	sessionBuf.buf.Write(line)
+	sessionBuf.count++
+
+	// Return the temporary buffer to pool
+	PutBuffer(buf)
 
 	// Check if we should flush
-	if s.shouldFlush(buf) {
-		return s.flushBuffer(sessionKey, buf)
+	if s.shouldFlush(sessionBuf) {
+		return s.flushBuffer(sessionKey, sessionBuf)
 	}
 
 	return nil
@@ -622,14 +634,14 @@ func (s *JSONLStore) Compact(
 func (s *JSONLStore) rewriteJSONL(
 	sessionKey string, msgs []providers.Message,
 ) error {
-	var buf bytes.Buffer
-	for i, msg := range msgs {
-		line, err := json.Marshal(msg)
-		if err != nil {
-			return fmt.Errorf("memory: marshal message %d: %w", i, err)
+	buf := GetBuffer()
+	defer PutBuffer(buf)
+
+	enc := json.NewEncoder(buf)
+	for _, msg := range msgs {
+		if err := enc.Encode(msg); err != nil {
+			return fmt.Errorf("memory: encode message: %w", err)
 		}
-		buf.Write(line)
-		buf.WriteByte('\n')
 	}
 	return fileutil.WriteFileAtomic(s.jsonlPath(sessionKey), buf.Bytes(), 0o644)
 }

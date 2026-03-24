@@ -124,7 +124,7 @@ func TestSpawnSubTurn(t *testing.T) {
 			parent := &turnState{
 				ctx:            context.Background(),
 				turnID:         "parent-1",
-				depth:          tt.parentDepth,
+				depth:          int32(tt.parentDepth),
 				childTurnIDs:   []string{},
 				pendingResults: make(chan *tools.ToolResult, 10),
 				session:        &ephemeralSessionStore{},
@@ -216,7 +216,7 @@ func TestSpawnSubTurn_EphemeralSessionIsolation(t *testing.T) {
 	// checking the parent session key is only used by the parent store.
 	// If isolation is correct, parent.session.GetHistory(childID) is always empty
 	// (the child never wrote to the parent store).
-	al.activeTurnStates.Range(func(k, v any) bool {
+	al.activeTurnStates.Range(func(k string, v *turnState) bool {
 		// No active turns should remain after spawnSubTurn returns
 		t.Errorf("unexpected active turn state left after spawnSubTurn: key=%v", k)
 		return true
@@ -1983,7 +1983,7 @@ func TestFinish_GracefulVsHard(t *testing.T) {
 			ctx:             ctx,
 			turnID:          "child-isended-test",
 			depth:           1,
-			parentTurnState: parentTS,
+			parent: parentTS,
 			pendingResults:  make(chan *tools.ToolResult, 16),
 		}
 

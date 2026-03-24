@@ -402,11 +402,7 @@ func (al *AgentLoop) InterruptHard() error {
 // session and returns all available results without blocking.
 // Returns nil if no active turn state exists for this session.
 func (al *AgentLoop) dequeuePendingSubTurnResults(sessionKey string) []*tools.ToolResult {
-	tsInterface, ok := al.activeTurnStates.Load(sessionKey)
-	if !ok {
-		return nil
-	}
-	ts, ok := tsInterface.(*turnState)
+	ts, ok := al.activeTurnStates.Load(sessionKey)
 	if !ok {
 		return nil
 	}
@@ -437,14 +433,9 @@ func (al *AgentLoop) dequeuePendingSubTurnResults(sessionKey string) []*tools.To
 // For graceful interruption that allows the agent to finish the current tool and summarize,
 // use Steer() instead.
 func (al *AgentLoop) HardAbort(sessionKey string) error {
-	tsInterface, ok := al.activeTurnStates.Load(sessionKey)
+	ts, ok := al.activeTurnStates.Load(sessionKey)
 	if !ok {
 		return fmt.Errorf("no active turn state found for session %s", sessionKey)
-	}
-
-	ts, ok := tsInterface.(*turnState)
-	if !ok {
-		return fmt.Errorf("invalid turn state type for session %s", sessionKey)
 	}
 
 	logger.InfoCF("agent", "Hard abort triggered", map[string]any{
@@ -463,7 +454,7 @@ func (al *AgentLoop) HardAbort(sessionKey string) error {
 	// Roll back session history to the state before the turn started.
 	if ts.session != nil {
 		history := ts.session.GetHistory(sessionKey)
-		if ts.initialHistoryLength < len(history) {
+		if int(ts.initialHistoryLength) < len(history) {
 			ts.session.SetHistory(sessionKey, history[:ts.initialHistoryLength])
 		}
 	}
