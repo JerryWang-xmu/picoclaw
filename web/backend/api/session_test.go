@@ -34,7 +34,8 @@ func TestHandleListSessions_JSONLStorage(t *testing.T) {
 	defer cleanup()
 
 	dir := sessionsTestDir(t, configPath)
-	store, err := memory.NewJSONLStore(dir)
+	// Use SyncModeAlways to ensure data is immediately visible for testing
+	store, err := memory.NewJSONLStore(dir, memory.WithSyncMode(memory.SyncModeAlways))
 	if err != nil {
 		t.Fatalf("NewJSONLStore() error = %v", err)
 	}
@@ -100,7 +101,8 @@ func TestHandleListSessions_TitleUsesTrimmedSummary(t *testing.T) {
 	defer cleanup()
 
 	dir := sessionsTestDir(t, configPath)
-	store, err := memory.NewJSONLStore(dir)
+	// Use SyncModeAlways to ensure data is immediately visible for testing
+	store, err := memory.NewJSONLStore(dir, memory.WithSyncMode(memory.SyncModeAlways))
 	if err != nil {
 		t.Fatalf("NewJSONLStore() error = %v", err)
 	}
@@ -156,7 +158,8 @@ func TestHandleGetSession_JSONLStorage(t *testing.T) {
 	defer cleanup()
 
 	dir := sessionsTestDir(t, configPath)
-	store, err := memory.NewJSONLStore(dir)
+	// Use SyncModeAlways to ensure data is immediately visible for testing
+	store, err := memory.NewJSONLStore(dir, memory.WithSyncMode(memory.SyncModeAlways))
 	if err != nil {
 		t.Fatalf("NewJSONLStore() error = %v", err)
 	}
