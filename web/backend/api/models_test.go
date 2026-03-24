@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -364,6 +365,24 @@ func TestMaskAPIKey(t *testing.T) {
 			got := maskAPIKey(tc.key)
 			if got != tc.want {
 				t.Fatalf("maskAPIKey(%q) = %q, want %q", tc.key, got, tc.want)
+			}
+
+			if tc.key != "" {
+				displayed := strings.Replace(tc.want, "****", "", 1)
+				if len(tc.key) <= 8 {
+					if displayed != "" {
+						t.Fatalf("maskAPIKey(%q) displayed part = %q, want empty", tc.key, displayed)
+					}
+				} else {
+					if len(displayed)*10 > len(tc.key)*6 {
+						t.Fatalf(
+							"maskAPIKey(%q) displayed length = %d, want at most 60%% of %d",
+							tc.key,
+							len(displayed),
+							len(tc.key),
+						)
+					}
+				}
 			}
 		})
 	}

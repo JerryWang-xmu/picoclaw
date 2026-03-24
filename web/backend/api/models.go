@@ -311,7 +311,7 @@ func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) 
 // Keys 9-12 chars show prefix + last 2 chars: "sk-****cd".
 // Shorter keys are fully masked as "****".
 // Empty keys return empty string.
-// Ensure at least 40% of the key is masked.
+// Ensure at least 40% of the key will not be displayed.
 func maskAPIKey(key string) string {
 	if key == "" {
 		return ""
