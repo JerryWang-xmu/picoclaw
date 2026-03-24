@@ -44,6 +44,10 @@ type ContextBuilder struct {
 	// build time. This catches nested file creations/deletions/mtime changes
 	// that may not update the top-level skill root directory mtime.
 	skillFilesAtCache map[string]time.Time
+
+	// skillFileCache provides rate-limited skill file change detection.
+	// This avoids expensive filesystem traversal on every cache check.
+	skillFileCache *SkillFileCache
 }
 
 func (cb *ContextBuilder) WithToolDiscovery(useBM25, useRegex bool) *ContextBuilder {
@@ -74,9 +78,10 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 	globalSkillsDir := filepath.Join(getGlobalConfigDir(), "skills")
 
 	return &ContextBuilder{
-		workspace:    workspace,
-		skillsLoader: skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
-		memory:       NewMemoryStore(workspace),
+		workspace:      workspace,
+		skillsLoader:   skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
+		memory:         NewMemoryStore(workspace),
+		skillFileCache: NewSkillFileCache(1 * time.Second),
 	}
 }
 
@@ -328,7 +333,7 @@ func (cb *ContextBuilder) sourceFilesChangedLocked() bool {
 			return true
 		}
 	}
-	if skillFilesChangedSince(cb.skillRoots(), cb.skillFilesAtCache) {
+	if cb.skillFileCache.Check(cb.skillRoots(), cb.skillFilesAtCache) {
 		return true
 	}
 
@@ -368,6 +373,60 @@ func (cb *ContextBuilder) fileChangedSince(path string) bool {
 // intent explicit and avoids the nilerr linter warning that would fire
 // if the callback returned nil when its err parameter is non-nil.
 var errWalkStop = errors.New("walk stop")
+
+// SkillFileCache provides a caching layer for skill file change detection.
+// It limits the frequency of expensive filesystem operations by caching
+// check results for a configurable minimum interval.
+type SkillFileCache struct {
+	mu           sync.RWMutex
+	lastCheck    time.Time
+	minInterval  time.Duration
+	filesAtCache map[string]time.Time
+	changed      bool
+}
+
+// NewSkillFileCache creates a new SkillFileCache with the specified minimum interval.
+// The minInterval controls how often actual filesystem checks are performed.
+func NewSkillFileCache(minInterval time.Duration) *SkillFileCache {
+	return &SkillFileCache{
+		minInterval: minInterval,
+	}
+}
+
+// Check determines if skill files have changed since the last check.
+// If called within minInterval of the last check, it returns the cached result.
+// Otherwise, it performs an actual filesystem check and caches the result.
+func (c *SkillFileCache) Check(skillRoots []string, filesAtCache map[string]time.Time) bool {
+	c.mu.RLock()
+	// Fast path: if we're within the minInterval, return cached result
+	if !c.lastCheck.IsZero() && time.Since(c.lastCheck) < c.minInterval {
+		result := c.changed
+		c.mu.RUnlock()
+		return result
+	}
+	c.mu.RUnlock()
+
+	// Slow path: perform actual check
+	return c.performCheck(skillRoots, filesAtCache)
+}
+
+// ForceCheck performs an immediate filesystem check regardless of the interval.
+// This is useful when you need to know the current state without waiting.
+func (c *SkillFileCache) ForceCheck(skillRoots []string, filesAtCache map[string]time.Time) bool {
+	return c.performCheck(skillRoots, filesAtCache)
+}
+
+// performCheck executes the actual filesystem check and updates the cache.
+func (c *SkillFileCache) performCheck(skillRoots []string, filesAtCache map[string]time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.lastCheck = time.Now()
+	c.filesAtCache = filesAtCache
+	c.changed = skillFilesChangedSince(skillRoots, filesAtCache)
+
+	return c.changed
+}
 
 // skillFilesChangedSince compares the current recursive skill file tree
 // against the cache-time snapshot. Any create/delete/mtime drift invalidates
@@ -612,6 +671,12 @@ func (cb *ContextBuilder) BuildMessages(
 }
 
 func sanitizeHistoryForProvider(history []providers.Message) []providers.Message {
+	return sanitizeHistoryForProviderOptimized(history)
+}
+
+// sanitizeHistoryForProviderOriginal is the original O(n²) implementation.
+// Kept for benchmarking and comparison purposes.
+func sanitizeHistoryForProviderOriginal(history []providers.Message) []providers.Message {
 	if len(history) == 0 {
 		return history
 	}
@@ -620,10 +685,6 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 	for _, msg := range history {
 		switch msg.Role {
 		case "system":
-			// Drop system messages from history. BuildMessages always
-			// constructs its own single system message (static + dynamic +
-			// summary); extra system messages would break providers that
-			// only accept one (Anthropic, Codex).
 			logger.DebugCF("agent", "Dropping system message from history", map[string]any{})
 			continue
 
@@ -632,8 +693,6 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 				logger.DebugCF("agent", "Dropping orphaned leading tool message", map[string]any{})
 				continue
 			}
-			// Walk backwards to find the nearest assistant message,
-			// skipping over any preceding tool messages (multi-tool-call case).
 			foundAssistant := false
 			for i := len(sanitized) - 1; i >= 0; i-- {
 				if sanitized[i].Role == "tool" {
@@ -673,16 +732,11 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 		}
 	}
 
-	// Second pass: ensure every assistant message with tool_calls has matching
-	// tool result messages following it. This is required by strict providers
-	// like DeepSeek that enforce: "An assistant message with 'tool_calls' must
-	// be followed by tool messages responding to each 'tool_call_id'."
 	final := make([]providers.Message, 0, len(sanitized))
 	seenToolCallID := make(map[string]bool)
 	for i := 0; i < len(sanitized); i++ {
 		msg := sanitized[i]
 
-		// Deduplicate tool results by ToolCallID
 		if msg.Role == "tool" && msg.ToolCallID != "" {
 			if seenToolCallID[msg.ToolCallID] {
 				logger.DebugCF("agent", "Dropping duplicate tool result", map[string]any{
@@ -694,13 +748,11 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 		}
 
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
-			// Collect expected tool_call IDs
 			expected := make(map[string]bool, len(msg.ToolCalls))
 			for _, tc := range msg.ToolCalls {
 				expected[tc.ID] = false
 			}
 
-			// Check following messages for matching tool results
 			toolMsgCount := 0
 			for j := i + 1; j < len(sanitized); j++ {
 				if sanitized[j].Role != "tool" {
@@ -712,7 +764,6 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 				}
 			}
 
-			// If any tool_call_id is missing, drop this assistant message and its partial tool messages
 			allFound := true
 			for toolCallID, found := range expected {
 				if !found {
@@ -731,7 +782,6 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 			}
 
 			if !allFound {
-				// Skip this assistant message and its tool messages
 				i += toolMsgCount
 				continue
 			}
@@ -740,6 +790,204 @@ func sanitizeHistoryForProvider(history []providers.Message) []providers.Message
 	}
 
 	return final
+}
+
+// sanitizeHistoryForProviderOptimized is the O(n) optimized implementation.
+// It uses a single pass with state tracking to achieve linear time complexity.
+func sanitizeHistoryForProviderOptimized(history []providers.Message) []providers.Message {
+	if len(history) == 0 {
+		return history
+	}
+
+	// State machine variables for tracking during single pass
+	type pendingAssistant struct {
+		index      int // index in output slice
+		toolCallIDs map[string]bool
+	}
+
+	var lastPendingAssistant *pendingAssistant
+	output := make([]providers.Message, 0, len(history))
+	seenToolCallIDs := make(map[string]bool)
+
+	for _, msg := range history {
+		switch msg.Role {
+		case "system":
+			logger.DebugCF("agent", "Dropping system message from history", map[string]any{})
+			continue
+
+		case "tool":
+			// Check for duplicate tool results first
+			if msg.ToolCallID != "" && seenToolCallIDs[msg.ToolCallID] {
+				logger.DebugCF("agent", "Dropping duplicate tool result", map[string]any{
+					"tool_call_id": msg.ToolCallID,
+				})
+				continue
+			}
+
+			// Validate: tool message must have a preceding assistant with matching tool_calls
+			if len(output) == 0 {
+				logger.DebugCF("agent", "Dropping orphaned leading tool message", map[string]any{})
+				continue
+			}
+
+			// Check if we have a pending assistant with matching tool_call_id
+			if lastPendingAssistant == nil {
+				logger.DebugCF("agent", "Dropping orphaned tool message", map[string]any{})
+				continue
+			}
+
+			if _, exists := lastPendingAssistant.toolCallIDs[msg.ToolCallID]; !exists {
+				logger.DebugCF("agent", "Dropping orphaned tool message", map[string]any{})
+				continue
+			}
+
+			// Valid tool message - add it and mark as seen
+			if msg.ToolCallID != "" {
+				seenToolCallIDs[msg.ToolCallID] = true
+			}
+			output = append(output, msg)
+
+		case "assistant":
+			// First, check if the previous pending assistant is now complete
+			// (all its tool calls have been matched with tool results)
+			if lastPendingAssistant != nil {
+				allFound := true
+				for toolCallID := range lastPendingAssistant.toolCallIDs {
+					if !seenToolCallIDs[toolCallID] {
+						allFound = false
+						break
+					}
+				}
+				if !allFound {
+					// Remove the incomplete assistant and its partial tool results
+					// Find how many tool messages to remove (from the end backwards)
+					removeCount := 0
+					for i := len(output) - 1; i >= lastPendingAssistant.index; i-- {
+						if output[i].Role == "tool" {
+							// Remove from seen set
+							if output[i].ToolCallID != "" {
+								delete(seenToolCallIDs, output[i].ToolCallID)
+							}
+							removeCount++
+						} else {
+							break
+						}
+					}
+					// Truncate output to remove assistant and its tool results
+					output = output[:lastPendingAssistant.index]
+					logger.DebugCF(
+						"agent",
+						"Dropping assistant message with incomplete tool results",
+						map[string]any{
+							"pending_index": lastPendingAssistant.index,
+							"removed_tools": removeCount,
+						},
+					)
+				}
+				lastPendingAssistant = nil
+			}
+
+			// Now process current assistant message
+			if len(msg.ToolCalls) > 0 {
+				if len(output) == 0 {
+					logger.DebugCF("agent", "Dropping assistant tool-call turn at history start", map[string]any{})
+					continue
+				}
+				prev := output[len(output)-1]
+				if prev.Role != "user" && prev.Role != "tool" {
+					logger.DebugCF(
+						"agent",
+						"Dropping assistant tool-call turn with invalid predecessor",
+						map[string]any{"prev_role": prev.Role},
+					)
+					continue
+				}
+				// This assistant has tool calls - mark as pending
+				toolCallIDs := make(map[string]bool, len(msg.ToolCalls))
+				for _, tc := range msg.ToolCalls {
+					toolCallIDs[tc.ID] = true
+				}
+				lastPendingAssistant = &pendingAssistant{
+					index:       len(output),
+					toolCallIDs: toolCallIDs,
+				}
+			}
+			output = append(output, msg)
+
+		default:
+			// For user messages, check if previous pending assistant is complete
+			if lastPendingAssistant != nil {
+				allFound := true
+				for toolCallID := range lastPendingAssistant.toolCallIDs {
+					if !seenToolCallIDs[toolCallID] {
+						allFound = false
+						break
+					}
+				}
+				if !allFound {
+					// Remove incomplete assistant and its tool results
+					removeCount := 0
+					for i := len(output) - 1; i >= lastPendingAssistant.index; i-- {
+						if output[i].Role == "tool" {
+							if output[i].ToolCallID != "" {
+								delete(seenToolCallIDs, output[i].ToolCallID)
+							}
+							removeCount++
+						} else {
+							break
+						}
+					}
+					output = output[:lastPendingAssistant.index]
+					logger.DebugCF(
+						"agent",
+						"Dropping assistant message with incomplete tool results",
+						map[string]any{
+							"pending_index": lastPendingAssistant.index,
+							"removed_tools": removeCount,
+						},
+					)
+				}
+				lastPendingAssistant = nil
+			}
+			output = append(output, msg)
+		}
+	}
+
+	// Final check: handle any remaining pending assistant at end of history
+	if lastPendingAssistant != nil {
+		allFound := true
+		for toolCallID := range lastPendingAssistant.toolCallIDs {
+			if !seenToolCallIDs[toolCallID] {
+				allFound = false
+				break
+			}
+		}
+		if !allFound {
+			// Remove incomplete assistant and its tool results
+			removeCount := 0
+			for i := len(output) - 1; i >= lastPendingAssistant.index; i-- {
+				if output[i].Role == "tool" {
+					if output[i].ToolCallID != "" {
+						delete(seenToolCallIDs, output[i].ToolCallID)
+					}
+					removeCount++
+				} else {
+					break
+				}
+			}
+			output = output[:lastPendingAssistant.index]
+			logger.DebugCF(
+				"agent",
+				"Dropping assistant message with incomplete tool results",
+				map[string]any{
+					"pending_index": lastPendingAssistant.index,
+					"removed_tools": removeCount,
+				},
+			)
+		}
+	}
+
+	return output
 }
 
 func (cb *ContextBuilder) AddToolResult(

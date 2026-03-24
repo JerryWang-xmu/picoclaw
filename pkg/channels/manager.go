@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	defaultChannelQueueSize = 16
+	defaultChannelQueueSize = 64
 	defaultRateLimit        = 10 // default 10 msg/s
 	maxRetries              = 3
 	rateLimitDelay          = 1 * time.Second

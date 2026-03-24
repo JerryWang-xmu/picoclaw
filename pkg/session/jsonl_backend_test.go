@@ -17,7 +17,7 @@ var (
 
 func newBackend(t *testing.T) *session.JSONLBackend {
 	t.Helper()
-	store, err := memory.NewJSONLStore(t.TempDir())
+	store, err := memory.NewJSONLStore(t.TempDir(), memory.WithSyncMode(memory.SyncModeAlways))
 	if err != nil {
 		t.Fatal(err)
 	}

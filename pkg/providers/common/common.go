@@ -38,29 +38,42 @@ type (
 
 const DefaultRequestTimeout = 120 * time.Second
 
+// Default connection pool settings for optimal performance
+const (
+	DefaultMaxIdleConns        = 100
+	DefaultMaxIdleConnsPerHost = 10
+	DefaultIdleConnTimeout     = 90 * time.Second
+)
+
 // NewHTTPClient creates an *http.Client with an optional proxy and the default timeout.
 func NewHTTPClient(proxy string) *http.Client {
+	return NewHTTPClientWithPool(proxy, DefaultMaxIdleConns, DefaultMaxIdleConnsPerHost, DefaultIdleConnTimeout)
+}
+
+// NewHTTPClientWithPool creates an *http.Client with configurable connection pool settings.
+// This allows fine-tuning of connection reuse for high-throughput scenarios.
+func NewHTTPClientWithPool(proxy string, maxIdleConns, maxIdleConnsPerHost int, idleConnTimeout time.Duration) *http.Client {
 	client := &http.Client{
 		Timeout: DefaultRequestTimeout,
 	}
+
+	// Create transport with optimized connection pool settings
+	transport := &http.Transport{
+		MaxIdleConns:        maxIdleConns,
+		MaxIdleConnsPerHost: maxIdleConnsPerHost,
+		IdleConnTimeout:     idleConnTimeout,
+	}
+
 	if proxy != "" {
 		parsed, err := url.Parse(proxy)
 		if err == nil {
-			// Preserve http.DefaultTransport settings (TLS, HTTP/2, timeouts, etc.)
-			if base, ok := http.DefaultTransport.(*http.Transport); ok {
-				tr := base.Clone()
-				tr.Proxy = http.ProxyURL(parsed)
-				client.Transport = tr
-			} else {
-				// Fallback: minimal transport if DefaultTransport is not *http.Transport.
-				client.Transport = &http.Transport{
-					Proxy: http.ProxyURL(parsed),
-				}
-			}
+			transport.Proxy = http.ProxyURL(parsed)
 		} else {
 			log.Printf("common: invalid proxy URL %q: %v", proxy, err)
 		}
 	}
+
+	client.Transport = transport
 	return client
 }
 

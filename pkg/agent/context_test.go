@@ -1,10 +1,511 @@
 package agent
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
+
+// TestSkillFileCache_WithinInterval_ReturnsCached tests that checks within minInterval return cached result.
+func TestSkillFileCache_WithinInterval_ReturnsCached(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillRoot := filepath.Join(tmpDir, "skills")
+	if err := os.MkdirAll(skillRoot, 0755); err != nil {
+		t.Fatalf("failed to create skill root: %v", err)
+	}
+
+	// Create a test file
+	testFile := filepath.Join(skillRoot, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	// Build initial cache with actual file mtime
+	info, err := os.Stat(testFile)
+	if err != nil {
+		t.Fatalf("failed to stat test file: %v", err)
+	}
+	filesAtCache := map[string]time.Time{
+		testFile: info.ModTime(),
+	}
+
+	cache := NewSkillFileCache(1 * time.Second)
+
+	// First check - should perform actual check
+	changed1 := cache.Check([]string{skillRoot}, filesAtCache)
+	if changed1 {
+		t.Error("first check should return false (no changes)")
+	}
+
+	// Immediately check again - should return cached result (no change)
+	// Modify the file but within interval - should not be detected
+	if err := os.WriteFile(testFile, []byte("modified"), 0644); err != nil {
+		t.Fatalf("failed to modify test file: %v", err)
+	}
+
+	changed2 := cache.Check([]string{skillRoot}, filesAtCache)
+	if changed2 {
+		t.Error("check within interval should return cached result (false)")
+	}
+}
+
+// TestSkillFileCache_AfterInterval_Rechecks tests that checks after minInterval perform actual check.
+func TestSkillFileCache_AfterInterval_Rechecks(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillRoot := filepath.Join(tmpDir, "skills")
+	if err := os.MkdirAll(skillRoot, 0755); err != nil {
+		t.Fatalf("failed to create skill root: %v", err)
+	}
+
+	// Create a test file
+	testFile := filepath.Join(skillRoot, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	// Build initial cache with current mtime
+	info, _ := os.Stat(testFile)
+	filesAtCache := map[string]time.Time{
+		testFile: info.ModTime(),
+	}
+
+	// Use a very short interval for testing
+	cache := NewSkillFileCache(10 * time.Millisecond)
+
+	// First check - should perform actual check
+	changed1 := cache.Check([]string{skillRoot}, filesAtCache)
+	if changed1 {
+		t.Error("first check should return false (no changes)")
+	}
+
+	// Wait for interval to pass
+	time.Sleep(20 * time.Millisecond)
+
+	// Check again after interval - should perform actual check
+	changed2 := cache.Check([]string{skillRoot}, filesAtCache)
+	if changed2 {
+		t.Error("check after interval with no changes should return false")
+	}
+}
+
+// TestSkillFileCache_FileChanged_Detected tests that file changes are detected after interval.
+func TestSkillFileCache_FileChanged_Detected(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillRoot := filepath.Join(tmpDir, "skills")
+	if err := os.MkdirAll(skillRoot, 0755); err != nil {
+		t.Fatalf("failed to create skill root: %v", err)
+	}
+
+	// Create a test file
+	testFile := filepath.Join(skillRoot, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	// Build initial cache with current mtime
+	info, _ := os.Stat(testFile)
+	filesAtCache := map[string]time.Time{
+		testFile: info.ModTime(),
+	}
+
+	// Use a very short interval for testing
+	cache := NewSkillFileCache(10 * time.Millisecond)
+
+	// First check - should perform actual check
+	changed1 := cache.Check([]string{skillRoot}, filesAtCache)
+	if changed1 {
+		t.Error("first check should return false (no changes)")
+	}
+
+	// Wait for interval to pass
+	time.Sleep(20 * time.Millisecond)
+
+	// Modify the file
+	if err := os.WriteFile(testFile, []byte("modified"), 0644); err != nil {
+		t.Fatalf("failed to modify test file: %v", err)
+	}
+
+	// Check after interval - should detect change
+	changed2 := cache.Check([]string{skillRoot}, filesAtCache)
+	if !changed2 {
+		t.Error("check after interval should detect file modification")
+	}
+}
+
+// TestSkillFileCache_NewFile_Detected tests that new files are detected.
+func TestSkillFileCache_NewFile_Detected(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillRoot := filepath.Join(tmpDir, "skills")
+	if err := os.MkdirAll(skillRoot, 0755); err != nil {
+		t.Fatalf("failed to create skill root: %v", err)
+	}
+
+	// Create initial test file
+	testFile1 := filepath.Join(skillRoot, "test1.txt")
+	if err := os.WriteFile(testFile1, []byte("test1"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	// Build initial cache
+	info, _ := os.Stat(testFile1)
+	filesAtCache := map[string]time.Time{
+		testFile1: info.ModTime(),
+	}
+
+	// Use a very short interval for testing
+	cache := NewSkillFileCache(10 * time.Millisecond)
+
+	// First check
+	changed1 := cache.Check([]string{skillRoot}, filesAtCache)
+	if changed1 {
+		t.Error("first check should return false")
+	}
+
+	// Wait for interval to pass
+	time.Sleep(20 * time.Millisecond)
+
+	// Create a new file
+	testFile2 := filepath.Join(skillRoot, "test2.txt")
+	if err := os.WriteFile(testFile2, []byte("test2"), 0644); err != nil {
+		t.Fatalf("failed to create second test file: %v", err)
+	}
+
+	// Check after interval - should detect new file
+	changed2 := cache.Check([]string{skillRoot}, filesAtCache)
+	if !changed2 {
+		t.Error("check after interval should detect new file")
+	}
+}
+
+// TestSkillFileCache_FileDeleted_Detected tests that file deletions are detected.
+func TestSkillFileCache_FileDeleted_Detected(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillRoot := filepath.Join(tmpDir, "skills")
+	if err := os.MkdirAll(skillRoot, 0755); err != nil {
+		t.Fatalf("failed to create skill root: %v", err)
+	}
+
+	// Create a test file
+	testFile := filepath.Join(skillRoot, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	// Build initial cache
+	info, _ := os.Stat(testFile)
+	filesAtCache := map[string]time.Time{
+		testFile: info.ModTime(),
+	}
+
+	// Use a very short interval for testing
+	cache := NewSkillFileCache(10 * time.Millisecond)
+
+	// First check
+	changed1 := cache.Check([]string{skillRoot}, filesAtCache)
+	if changed1 {
+		t.Error("first check should return false")
+	}
+
+	// Wait for interval to pass
+	time.Sleep(20 * time.Millisecond)
+
+	// Delete the file
+	if err := os.Remove(testFile); err != nil {
+		t.Fatalf("failed to remove test file: %v", err)
+	}
+
+	// Check after interval - should detect deletion
+	changed2 := cache.Check([]string{skillRoot}, filesAtCache)
+	if !changed2 {
+		t.Error("check after interval should detect file deletion")
+	}
+}
+
+// TestSkillFileCache_ForceCheck tests that ForceCheck bypasses interval.
+func TestSkillFileCache_ForceCheck(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillRoot := filepath.Join(tmpDir, "skills")
+	if err := os.MkdirAll(skillRoot, 0755); err != nil {
+		t.Fatalf("failed to create skill root: %v", err)
+	}
+
+	// Create a test file
+	testFile := filepath.Join(skillRoot, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	// Build initial cache with actual file mtime
+	info, _ := os.Stat(testFile)
+	filesAtCache := map[string]time.Time{
+		testFile: info.ModTime(),
+	}
+
+	// Use a long interval
+	cache := NewSkillFileCache(1 * time.Hour)
+
+	// First check
+	changed1 := cache.Check([]string{skillRoot}, filesAtCache)
+	if changed1 {
+		t.Error("first check should return false")
+	}
+
+	// Modify the file
+	if err := os.WriteFile(testFile, []byte("modified"), 0644); err != nil {
+		t.Fatalf("failed to modify test file: %v", err)
+	}
+
+	// Normal check within interval - should return cached result (false)
+	changed2 := cache.Check([]string{skillRoot}, filesAtCache)
+	if changed2 {
+		t.Error("check within interval should return cached result")
+	}
+
+	// Force check with updated mtime - should bypass interval and detect no change from new baseline
+	info, _ = os.Stat(testFile)
+	filesAtCache[testFile] = info.ModTime()
+	changed3 := cache.ForceCheck([]string{skillRoot}, filesAtCache)
+	if changed3 {
+		t.Error("force check with updated mtime should return false (no change from new baseline)")
+	}
+
+	// Delete the file and force check - should detect deletion
+	if err := os.Remove(testFile); err != nil {
+		t.Fatalf("failed to remove test file: %v", err)
+	}
+	changed4 := cache.ForceCheck([]string{skillRoot}, filesAtCache)
+	if !changed4 {
+		t.Error("force check should detect file deletion")
+	}
+}
+
+// TestSkillFileCache_NilCache_ReturnsTrue tests that nil cache returns true.
+func TestSkillFileCache_NilCache_ReturnsTrue(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillRoot := filepath.Join(tmpDir, "skills")
+
+	cache := NewSkillFileCache(1 * time.Second)
+
+	// Check with nil filesAtCache should return true
+	changed := cache.Check([]string{skillRoot}, nil)
+	if !changed {
+		t.Error("check with nil filesAtCache should return true")
+	}
+}
+
+// BenchmarkSkillFileCache benchmarks the cache performance.
+func BenchmarkSkillFileCache(b *testing.B) {
+	tmpDir := b.TempDir()
+	skillRoot := filepath.Join(tmpDir, "skills")
+	if err := os.MkdirAll(skillRoot, 0755); err != nil {
+		b.Fatalf("failed to create skill root: %v", err)
+	}
+
+	// Create multiple test files
+	filesAtCache := make(map[string]time.Time)
+	for i := 0; i < 10; i++ {
+		testFile := filepath.Join(skillRoot, fmt.Sprintf("test%d.txt", i))
+		if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+			b.Fatalf("failed to create test file: %v", err)
+		}
+		info, _ := os.Stat(testFile)
+		filesAtCache[testFile] = info.ModTime()
+	}
+
+	cache := NewSkillFileCache(1 * time.Second)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = cache.Check([]string{skillRoot}, filesAtCache)
+	}
+}
+
+// BenchmarkSanitizeHistory_1000Msgs benchmarks the performance of
+// sanitizeHistoryForProvider with 1000 messages to verify O(n) optimization.
+func BenchmarkSanitizeHistory_1000Msgs(b *testing.B) {
+	// Generate a realistic conversation history with 1000 messages
+	// Pattern: user -> assistant with tools -> tool results -> assistant
+	history := make([]providers.Message, 0, 1000)
+	for i := 0; i < 200; i++ {
+		toolID1 := fmt.Sprintf("tool_%d_a", i)
+		toolID2 := fmt.Sprintf("tool_%d_b", i)
+		history = append(history, msg("user", fmt.Sprintf("request %d", i)))
+		history = append(history, assistantWithTools(toolID1, toolID2))
+		history = append(history, toolResult(toolID1))
+		history = append(history, toolResult(toolID2))
+		history = append(history, msg("assistant", fmt.Sprintf("response %d", i)))
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = sanitizeHistoryForProvider(history)
+	}
+}
+
+// TestSanitizeHistory_OriginalVsOptimized_Equivalence verifies that both
+// implementations produce identical output for various test cases.
+func TestSanitizeHistory_OriginalVsOptimized_Equivalence(t *testing.T) {
+	testCases := []struct {
+		name    string
+		history []providers.Message
+	}{
+		{
+			name:    "empty history",
+			history: []providers.Message{},
+		},
+		{
+			name: "single tool call",
+			history: []providers.Message{
+				msg("user", "hello"),
+				assistantWithTools("A"),
+				toolResult("A"),
+				msg("assistant", "done"),
+			},
+		},
+		{
+			name: "multi tool calls",
+			history: []providers.Message{
+				msg("user", "do two things"),
+				assistantWithTools("A", "B"),
+				toolResult("A"),
+				toolResult("B"),
+				msg("assistant", "both done"),
+			},
+		},
+		{
+			name: "orphaned leading tool",
+			history: []providers.Message{
+				toolResult("A"),
+				msg("user", "hello"),
+			},
+		},
+		{
+			name: "tool after user dropped",
+			history: []providers.Message{
+				msg("user", "hello"),
+				toolResult("A"),
+			},
+		},
+		{
+			name: "incomplete tool results",
+			history: []providers.Message{
+				msg("user", "do two things"),
+				assistantWithTools("A", "B"),
+				toolResult("A"),
+				msg("user", "next question"),
+				msg("assistant", "answer"),
+			},
+		},
+		{
+			name: "duplicate tool results",
+			history: []providers.Message{
+				msg("user", "do something"),
+				assistantWithTools("A", "B"),
+				toolResult("A"),
+				toolResult("B"),
+				toolResult("A"), // duplicate
+				toolResult("B"), // duplicate
+				msg("assistant", "done"),
+			},
+		},
+		{
+			name: "consecutive multi tool rounds",
+			history: []providers.Message{
+				msg("user", "start"),
+				assistantWithTools("A", "B"),
+				toolResult("A"),
+				toolResult("B"),
+				assistantWithTools("C", "D"),
+				toolResult("C"),
+				toolResult("D"),
+				msg("assistant", "all done"),
+			},
+		},
+		{
+			name: "partial tool results in middle",
+			history: []providers.Message{
+				msg("user", "first"),
+				assistantWithTools("A"),
+				toolResult("A"),
+				msg("assistant", "done"),
+				msg("user", "second"),
+				assistantWithTools("B", "C"),
+				toolResult("B"),
+				msg("user", "third"),
+				assistantWithTools("D"),
+				toolResult("D"),
+				msg("assistant", "all done"),
+			},
+		},
+		{
+			name: "system messages dropped",
+			history: []providers.Message{
+				msg("system", "system prompt"),
+				msg("user", "hello"),
+				msg("system", "another system"),
+				msg("assistant", "hi"),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			original := sanitizeHistoryForProviderOriginal(tc.history)
+			optimized := sanitizeHistoryForProviderOptimized(tc.history)
+
+			if len(original) != len(optimized) {
+				t.Fatalf("length mismatch: original=%d, optimized=%d", len(original), len(optimized))
+			}
+
+			for i := range original {
+				if original[i].Role != optimized[i].Role {
+					t.Errorf("msg[%d].Role: original=%q, optimized=%q", i, original[i].Role, optimized[i].Role)
+				}
+				if original[i].Content != optimized[i].Content {
+					t.Errorf("msg[%d].Content: original=%q, optimized=%q", i, original[i].Content, optimized[i].Content)
+				}
+				if original[i].ToolCallID != optimized[i].ToolCallID {
+					t.Errorf("msg[%d].ToolCallID: original=%q, optimized=%q", i, original[i].ToolCallID, optimized[i].ToolCallID)
+				}
+				if len(original[i].ToolCalls) != len(optimized[i].ToolCalls) {
+					t.Errorf("msg[%d].ToolCalls length: original=%d, optimized=%d", i, len(original[i].ToolCalls), len(optimized[i].ToolCalls))
+				}
+			}
+		})
+	}
+}
+
+// TestSanitizeHistory_OriginalVsOptimized_LargeInput tests equivalence on a large input.
+func TestSanitizeHistory_OriginalVsOptimized_LargeInput(t *testing.T) {
+	// Generate 1000 messages
+	history := make([]providers.Message, 0, 1000)
+	for i := 0; i < 200; i++ {
+		toolID1 := fmt.Sprintf("tool_%d_a", i)
+		toolID2 := fmt.Sprintf("tool_%d_b", i)
+		history = append(history, msg("user", fmt.Sprintf("request %d", i)))
+		history = append(history, assistantWithTools(toolID1, toolID2))
+		history = append(history, toolResult(toolID1))
+		history = append(history, toolResult(toolID2))
+		history = append(history, msg("assistant", fmt.Sprintf("response %d", i)))
+	}
+
+	original := sanitizeHistoryForProviderOriginal(history)
+	optimized := sanitizeHistoryForProviderOptimized(history)
+
+	if len(original) != len(optimized) {
+		t.Fatalf("length mismatch: original=%d, optimized=%d", len(original), len(optimized))
+	}
+
+	for i := range original {
+		if original[i].Role != optimized[i].Role {
+			t.Errorf("msg[%d].Role: original=%q, optimized=%q", i, original[i].Role, optimized[i].Role)
+		}
+	}
+}
 
 func msg(role, content string) providers.Message {
 	return providers.Message{Role: role, Content: content}

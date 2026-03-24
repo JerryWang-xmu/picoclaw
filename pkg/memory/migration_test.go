@@ -385,10 +385,11 @@ func TestMigrateFromJSON_NonexistentDir(t *testing.T) {
 
 func TestMigrateFromJSON_SkipsMetaJSONFiles(t *testing.T) {
 	sessionsDir := t.TempDir()
-	store, err := NewJSONLStore(sessionsDir)
+	store, err := NewJSONLStore(sessionsDir, WithSyncMode(SyncModeAlways))
 	if err != nil {
 		t.Fatalf("NewJSONLStore: %v", err)
 	}
+	defer store.Close()
 	ctx := context.Background()
 
 	if addErr := store.AddMessage(ctx, "agent:main:pico:direct:pico:test", "user", "keep me"); addErr != nil {

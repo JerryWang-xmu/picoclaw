@@ -30,7 +30,41 @@ const (
 	// we set a generous limit. The scanner starts at 64 KB and grows
 	// only as needed up to this cap.
 	maxLineSize = 10 * 1024 * 1024 // 10 MB
+
+	// defaultBatchCount is the default number of messages to buffer
+	// before triggering an fsync in Periodic mode.
+	defaultBatchCount = 100
+
+	// defaultBatchInterval is the default maximum time to wait
+	// before triggering an fsync in Periodic mode.
+	defaultBatchInterval = 100 * time.Millisecond
 )
+
+// SyncMode controls when fsync is called for durability.
+type SyncMode int
+
+const (
+	// SyncModeAlways syncs on every write (original behavior, safest but slowest).
+	SyncModeAlways SyncMode = iota
+	// SyncModePeriodic syncs when buffer reaches count threshold or time threshold.
+	SyncModePeriodic
+	// SyncModeOnClose only syncs on Close (fastest but riskiest).
+	SyncModeOnClose
+)
+
+// sessionBuffer holds buffered writes for a single session.
+type sessionBuffer struct {
+	buf           *bytes.Buffer
+	count         int
+	lastFlushTime time.Time
+}
+
+// bufferPool is a sync.Pool for reusing byte buffers.
+var bufferPool = sync.Pool{
+	New: func() any {
+		return new(bytes.Buffer)
+	},
+}
 
 // sessionMeta holds per-session metadata stored in a .meta.json file.
 type sessionMeta struct {
@@ -54,17 +88,54 @@ type sessionMeta struct {
 // GetHistory ignores lines before that offset. This keeps all writes
 // append-only, which is both fast and crash-safe.
 type JSONLStore struct {
-	dir   string
-	locks [numLockShards]sync.Mutex
+	dir                 string
+	locks               [numLockShards]sync.Mutex
+	syncMode            SyncMode
+	batchCountThreshold int
+	batchTimeThreshold  time.Duration
+	buffers             map[string]*sessionBuffer
+	buffersMu           sync.Mutex
 }
 
 // NewJSONLStore creates a new JSONL-backed store rooted at dir.
-func NewJSONLStore(dir string) (*JSONLStore, error) {
+// Default sync mode is SyncModePeriodic with 100 messages or 100ms thresholds.
+func NewJSONLStore(dir string, opts ...StoreOption) (*JSONLStore, error) {
 	err := os.MkdirAll(dir, 0o755)
 	if err != nil {
 		return nil, fmt.Errorf("memory: create directory: %w", err)
 	}
-	return &JSONLStore{dir: dir}, nil
+
+	store := &JSONLStore{
+		dir:                 dir,
+		syncMode:            SyncModePeriodic,
+		batchCountThreshold: defaultBatchCount,
+		batchTimeThreshold:  defaultBatchInterval,
+		buffers:             make(map[string]*sessionBuffer),
+	}
+
+	for _, opt := range opts {
+		opt(store)
+	}
+
+	return store, nil
+}
+
+// StoreOption is a functional option for configuring JSONLStore.
+type StoreOption func(*JSONLStore)
+
+// WithSyncMode sets the sync mode for the store.
+func WithSyncMode(mode SyncMode) StoreOption {
+	return func(s *JSONLStore) {
+		s.syncMode = mode
+	}
+}
+
+// WithBatchThresholds sets the batch count and time thresholds for Periodic mode.
+func WithBatchThresholds(count int, interval time.Duration) StoreOption {
+	return func(s *JSONLStore) {
+		s.batchCountThreshold = count
+		s.batchTimeThreshold = interval
+	}
 }
 
 // sessionLock returns a mutex for the given session key.
@@ -214,6 +285,103 @@ func (s *JSONLStore) AddFullMessage(
 	return s.addMsg(sessionKey, msg)
 }
 
+// getBuffer gets or creates a buffer for the given session.
+// Must be called with session lock held.
+func (s *JSONLStore) getBuffer(sessionKey string) *sessionBuffer {
+	s.buffersMu.Lock()
+	defer s.buffersMu.Unlock()
+
+	if buf, ok := s.buffers[sessionKey]; ok {
+		return buf
+	}
+
+	buf := &sessionBuffer{
+		buf:           bufferPool.Get().(*bytes.Buffer),
+		lastFlushTime: time.Now(),
+	}
+	buf.buf.Reset()
+	s.buffers[sessionKey] = buf
+	return buf
+}
+
+// shouldFlush checks if the buffer should be flushed based on sync mode and thresholds.
+// Must be called with session lock held.
+func (s *JSONLStore) shouldFlush(buf *sessionBuffer) bool {
+	switch s.syncMode {
+	case SyncModeAlways:
+		return true
+	case SyncModeOnClose:
+		return false
+	case SyncModePeriodic:
+		if buf.count >= s.batchCountThreshold {
+			return true
+		}
+		if time.Since(buf.lastFlushTime) >= s.batchTimeThreshold {
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+// flushBuffer writes buffered data to disk and updates metadata.
+// Must be called with session lock held.
+func (s *JSONLStore) flushBuffer(sessionKey string, buf *sessionBuffer) error {
+	if buf.buf.Len() == 0 {
+		return nil
+	}
+
+	// Open file for append
+	f, err := os.OpenFile(
+		s.jsonlPath(sessionKey),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
+		0o644,
+	)
+	if err != nil {
+		return fmt.Errorf("memory: open jsonl for append: %w", err)
+	}
+
+	// Write buffered data
+	_, writeErr := f.Write(buf.buf.Bytes())
+	if writeErr != nil {
+		f.Close()
+		return fmt.Errorf("memory: append messages: %w", writeErr)
+	}
+
+	// Sync to disk for durability
+	if syncErr := f.Sync(); syncErr != nil {
+		f.Close()
+		return fmt.Errorf("memory: sync jsonl: %w", syncErr)
+	}
+
+	if closeErr := f.Close(); closeErr != nil {
+		return fmt.Errorf("memory: close jsonl: %w", closeErr)
+	}
+
+	// Update metadata
+	meta, err := s.readMeta(sessionKey)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if meta.Count == 0 && meta.CreatedAt.IsZero() {
+		meta.CreatedAt = now
+	}
+	meta.Count += buf.count
+	meta.UpdatedAt = now
+
+	if err := s.writeMeta(sessionKey, meta); err != nil {
+		return err
+	}
+
+	// Reset buffer
+	buf.buf.Reset()
+	buf.count = 0
+	buf.lastFlushTime = now
+
+	return nil
+}
+
 // addMsg is the shared implementation for AddMessage and AddFullMessage.
 func (s *JSONLStore) addMsg(sessionKey string, msg providers.Message) error {
 	l := s.sessionLock(sessionKey)
@@ -227,44 +395,55 @@ func (s *JSONLStore) addMsg(sessionKey string, msg providers.Message) error {
 	}
 	line = append(line, '\n')
 
-	f, err := os.OpenFile(
-		s.jsonlPath(sessionKey),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
-		0o644,
-	)
-	if err != nil {
-		return fmt.Errorf("memory: open jsonl for append: %w", err)
-	}
-	_, writeErr := f.Write(line)
-	if writeErr != nil {
-		f.Close()
-		return fmt.Errorf("memory: append message: %w", writeErr)
-	}
-	// Flush to physical storage before closing. This matches the
-	// durability guarantee of writeMeta and rewriteJSONL (which use
-	// WriteFileAtomic with fsync). Without Sync, a power loss could
-	// leave the append in the kernel page cache only — lost on reboot.
-	if syncErr := f.Sync(); syncErr != nil {
-		f.Close()
-		return fmt.Errorf("memory: sync jsonl: %w", syncErr)
-	}
-	if closeErr := f.Close(); closeErr != nil {
-		return fmt.Errorf("memory: close jsonl: %w", closeErr)
+	// Handle Always mode - immediate write
+	if s.syncMode == SyncModeAlways {
+		f, err := os.OpenFile(
+			s.jsonlPath(sessionKey),
+			os.O_CREATE|os.O_WRONLY|os.O_APPEND,
+			0o644,
+		)
+		if err != nil {
+			return fmt.Errorf("memory: open jsonl for append: %w", err)
+		}
+		_, writeErr := f.Write(line)
+		if writeErr != nil {
+			f.Close()
+			return fmt.Errorf("memory: append message: %w", writeErr)
+		}
+		if syncErr := f.Sync(); syncErr != nil {
+			f.Close()
+			return fmt.Errorf("memory: sync jsonl: %w", syncErr)
+		}
+		if closeErr := f.Close(); closeErr != nil {
+			return fmt.Errorf("memory: close jsonl: %w", closeErr)
+		}
+
+		// Update metadata for single message
+		meta, err := s.readMeta(sessionKey)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		if meta.Count == 0 && meta.CreatedAt.IsZero() {
+			meta.CreatedAt = now
+		}
+		meta.Count++
+		meta.UpdatedAt = now
+
+		return s.writeMeta(sessionKey, meta)
 	}
 
-	// Update metadata.
-	meta, err := s.readMeta(sessionKey)
-	if err != nil {
-		return err
-	}
-	now := time.Now()
-	if meta.Count == 0 && meta.CreatedAt.IsZero() {
-		meta.CreatedAt = now
-	}
-	meta.Count++
-	meta.UpdatedAt = now
+	// Handle Periodic and OnClose modes with buffering
+	buf := s.getBuffer(sessionKey)
+	buf.buf.Write(line)
+	buf.count++
 
-	return s.writeMeta(sessionKey, meta)
+	// Check if we should flush
+	if s.shouldFlush(buf) {
+		return s.flushBuffer(sessionKey, buf)
+	}
+
+	return nil
 }
 
 func (s *JSONLStore) GetHistory(
@@ -456,5 +635,26 @@ func (s *JSONLStore) rewriteJSONL(
 }
 
 func (s *JSONLStore) Close() error {
+	s.buffersMu.Lock()
+	defer s.buffersMu.Unlock()
+
+	// Flush all pending buffers
+	for sessionKey, buf := range s.buffers {
+		// Need to acquire session lock for each flush
+		l := s.sessionLock(sessionKey)
+		l.Lock()
+
+		if err := s.flushBuffer(sessionKey, buf); err != nil {
+			l.Unlock()
+			return fmt.Errorf("memory: flush buffer for session %s: %w", sessionKey, err)
+		}
+
+		// Return buffer to pool
+		bufferPool.Put(buf.buf)
+		l.Unlock()
+	}
+
+	// Clear the buffers map
+	s.buffers = make(map[string]*sessionBuffer)
 	return nil
 }

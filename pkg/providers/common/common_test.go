@@ -38,8 +38,20 @@ func TestNewHTTPClient_WithProxy(t *testing.T) {
 
 func TestNewHTTPClient_NoProxy(t *testing.T) {
 	client := NewHTTPClient("")
-	if client.Transport != nil {
-		t.Errorf("expected nil transport without proxy, got %T", client.Transport)
+	// Transport should always be set now with connection pool configuration
+	if client.Transport == nil {
+		t.Errorf("expected non-nil transport with connection pool config, got nil")
+	}
+	// Verify connection pool settings
+	if transport, ok := client.Transport.(*http.Transport); ok {
+		if transport.MaxIdleConns != DefaultMaxIdleConns {
+			t.Errorf("MaxIdleConns = %d, want %d", transport.MaxIdleConns, DefaultMaxIdleConns)
+		}
+		if transport.MaxIdleConnsPerHost != DefaultMaxIdleConnsPerHost {
+			t.Errorf("MaxIdleConnsPerHost = %d, want %d", transport.MaxIdleConnsPerHost, DefaultMaxIdleConnsPerHost)
+		}
+	} else {
+		t.Errorf("expected *http.Transport, got %T", client.Transport)
 	}
 }
 

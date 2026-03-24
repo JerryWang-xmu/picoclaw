@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -305,7 +306,11 @@ func initSessionStore(dir string) session.SessionStore {
 		logger.InfoCF("agent", "Memory migrated to JSONL", map[string]any{"sessions_migrated": n})
 	}
 
-	return session.NewJSONLBackend(store)
+	// Wrap with CachedStore for read performance and to ensure
+	// GetHistory sees unflushed messages from Periodic sync mode.
+	cachedStore := memory.NewCachedStore(store, 5*time.Minute, 1000)
+
+	return session.NewJSONLBackend(cachedStore)
 }
 
 func expandHome(path string) string {

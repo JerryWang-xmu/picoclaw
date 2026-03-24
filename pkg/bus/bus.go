@@ -12,7 +12,7 @@ import (
 // ErrBusClosed is returned when publishing to a closed MessageBus.
 var ErrBusClosed = errors.New("message bus closed")
 
-const defaultBusBufferSize = 64
+const defaultBusBufferSize = 256
 
 // StreamDelegate is implemented by the channel Manager to provide streaming
 // capabilities to the agent loop without tight coupling.

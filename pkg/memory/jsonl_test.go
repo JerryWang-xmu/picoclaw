@@ -12,7 +12,7 @@ import (
 
 func newTestStore(t *testing.T) *JSONLStore {
 	t.Helper()
-	store, err := NewJSONLStore(t.TempDir())
+	store, err := NewJSONLStore(t.TempDir(), WithSyncMode(SyncModeAlways))
 	if err != nil {
 		t.Fatalf("NewJSONLStore: %v", err)
 	}
