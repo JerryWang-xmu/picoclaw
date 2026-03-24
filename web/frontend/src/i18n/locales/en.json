@@ -154,7 +154,8 @@
       "unconfigured": "Not configured"
     },
     "badge": {
-      "default": "Default"
+      "default": "Default",
+      "virtual": "Virtual"
     },
     "action": {
       "edit": "Edit API key",

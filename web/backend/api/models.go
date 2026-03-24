@@ -42,6 +42,7 @@ type modelResponse struct {
 	// Meta
 	Configured bool `json:"configured"`
 	IsDefault  bool `json:"is_default"`
+	IsVirtual  bool `json:"is_virtual"`
 }
 
 // handleListModels returns all model_list entries with masked API keys.
@@ -86,6 +87,7 @@ func (h *Handler) handleListModels(w http.ResponseWriter, r *http.Request) {
 			ExtraBody:      m.ExtraBody,
 			Configured:     configured[i],
 			IsDefault:      m.ModelName == defaultModel,
+			IsVirtual:      m.IsVirtual(),
 		})
 	}
 
@@ -288,16 +290,22 @@ func (h *Handler) handleSetDefaultModel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Verify the model_name exists in model_list
+	// Verify the model_name exists in model_list and is not a virtual model
 	found := false
+	isVirtual := false
 	for _, m := range cfg.ModelList {
 		if m.ModelName == req.ModelName {
 			found = true
+			isVirtual = m.IsVirtual()
 			break
 		}
 	}
 	if !found {
 		http.Error(w, fmt.Sprintf("Model %q not found in model_list", req.ModelName), http.StatusNotFound)
+		return
+	}
+	if isVirtual {
+		http.Error(w, fmt.Sprintf("Cannot set virtual model %q as default", req.ModelName), http.StatusBadRequest)
 		return
 	}
 

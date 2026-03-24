@@ -154,7 +154,8 @@
       "unconfigured": "未配置"
     },
     "badge": {
-      "default": "默认"
+      "default": "默认",
+      "virtual": "虚拟"
     },
     "action": {
       "edit": "编辑 API Key",
