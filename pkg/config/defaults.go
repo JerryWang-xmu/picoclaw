@@ -6,7 +6,6 @@
 package config
 
 import (
-	"os"
 	"path/filepath"
 
 	"github.com/sipeed/picoclaw/pkg"
@@ -14,16 +13,7 @@ import (
 
 // DefaultConfig returns the default configuration for PicoClaw.
 func DefaultConfig() *Config {
-	// Determine the base path for the workspace.
-	// Priority: $PICOCLAW_HOME > ~/.picoclaw
-	var homePath string
-	if picoclawHome := os.Getenv(EnvHome); picoclawHome != "" {
-		homePath = picoclawHome
-	} else {
-		userHome, _ := os.UserHomeDir()
-		homePath = filepath.Join(userHome, pkg.DefaultPicoClawHome)
-	}
-	workspacePath := filepath.Join(homePath, pkg.WorkspaceName)
+	workspacePath := filepath.Join(GetHome(), pkg.WorkspaceName)
 
 	return &Config{
 		Version: CurrentVersion,
@@ -39,9 +29,10 @@ func DefaultConfig() *Config {
 				SummarizeTokenPercent:     75,
 				SteeringMode:              "one-at-a-time",
 				ToolFeedback: ToolFeedbackConfig{
-					Enabled:       true,
+					Enabled:       false,
 					MaxArgsLength: 300,
 				},
+				SplitOnMarker: false,
 			},
 		},
 		Bindings: []AgentBinding{},
@@ -62,7 +53,7 @@ func DefaultConfig() *Config {
 				Typing:    TypingConfig{Enabled: true},
 				Placeholder: PlaceholderConfig{
 					Enabled: true,
-					Text:    "Thinking... 💭",
+					Text:    FlexibleStringSlice{"Thinking... 💭"},
 				},
 				Streaming:     StreamingConfig{Enabled: true, ThrottleSeconds: 3, MinGrowthChars: 200},
 				UseMarkdownV2: false,
@@ -111,7 +102,7 @@ func DefaultConfig() *Config {
 				},
 				Placeholder: PlaceholderConfig{
 					Enabled: true,
-					Text:    "Thinking... 💭",
+					Text:    FlexibleStringSlice{"Thinking... 💭"},
 				},
 				CryptoDatabasePath: "",
 				CryptoPassphrase:   "",
@@ -356,7 +347,7 @@ func DefaultConfig() *Config {
 			Host:      "127.0.0.1",
 			Port:      18790,
 			HotReload: false,
-			LogLevel:  "fatal",
+			LogLevel:  DefaultGatewayLogLevel,
 		},
 		Tools: ToolsConfig{
 			FilterSensitiveData: true,
@@ -517,12 +508,6 @@ func DefaultConfig() *Config {
 			GitCommit: GitCommit,
 			BuildTime: BuildTime,
 			GoVersion: GoVersion,
-		},
-		security: &SecurityConfig{
-			ModelList: map[string]ModelSecurityEntry{},
-			Channels:  &ChannelsSecurity{},
-			Web:       &WebToolsSecurity{},
-			Skills:    &SkillsSecurity{},
 		},
 	}
 }
