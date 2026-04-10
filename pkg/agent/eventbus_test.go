@@ -475,6 +475,7 @@ func TestAgentLoop_EmitsSessionSummarizeEvent(t *testing.T) {
 	// Use legacyContextManager's summarizeSession via contextManager interface
 	lcm := &legacyContextManager{al: al}
 	lcm.summarizeSession(defaultAgent, "session-1")
+
 	events := collectEventStream(sub.C)
 	summaryEvt, ok := findEvent(events, EventKindSessionSummarize)
 	if !ok {
