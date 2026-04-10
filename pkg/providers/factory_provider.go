@@ -24,6 +24,7 @@ type protocolMeta struct {
 
 var protocolMetaByName = map[string]protocolMeta{
 	"openai":                   {defaultAPIBase: "https://api.openai.com/v1"},
+	"venice":                   {defaultAPIBase: "https://api.venice.ai/api/v1"},
 	"openrouter":               {defaultAPIBase: "https://openrouter.ai/api/v1"},
 	"litellm":                  {defaultAPIBase: "http://localhost:4000/v1"},
 	"lmstudio":                 {defaultAPIBase: "http://localhost:1234/v1", emptyAPIKeyAllowed: true},
@@ -98,6 +99,19 @@ func ExtractProtocol(model string) (protocol, modelID string) {
 	return protocol, modelID
 }
 
+// ResolveAPIBase returns the configured API base, or the protocol default when
+// the model uses an HTTP-based provider family with a known default endpoint.
+func ResolveAPIBase(cfg *config.ModelConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	if apiBase := strings.TrimSpace(cfg.APIBase); apiBase != "" {
+		return strings.TrimRight(apiBase, "/")
+	}
+	protocol, _ := ExtractProtocol(cfg.Model)
+	return strings.TrimRight(getDefaultAPIBase(protocol), "/")
+}
+
 // CreateProviderFromConfig creates a provider based on the ModelConfig.
 // It uses the protocol prefix in the Model field to determine which provider to create.
 // Supported protocol families include OpenAI-compatible prefixes (e.g., openai, openrouter, groq, gemini),
@@ -114,6 +128,11 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 	}
 
 	protocol, modelID := ExtractProtocol(cfg.Model)
+
+	userAgent := cfg.UserAgent
+	if userAgent == "" {
+		userAgent = fmt.Sprintf("PicoClaw/%s", config.Version)
+	}
 
 	switch protocol {
 	case "openai":
@@ -138,8 +157,10 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			apiBase,
 			cfg.Proxy,
 			cfg.MaxTokensField,
+			userAgent,
 			cfg.RequestTimeout,
 			cfg.ExtraBody,
+			cfg.CustomHeaders,
 		), modelID, nil
 
 	case "azure", "azure-openai":
@@ -157,6 +178,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			cfg.APIKey(),
 			cfg.APIBase,
 			cfg.Proxy,
+			userAgent,
 			cfg.RequestTimeout,
 		), modelID, nil
 
@@ -196,7 +218,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		}
 		return provider, modelID, nil
 
-	case "litellm", "lmstudio", "openrouter", "groq", "zhipu", "gemini", "nvidia",
+	case "litellm", "lmstudio", "openrouter", "groq", "zhipu", "gemini", "nvidia", "venice",
 		"ollama", "moonshot", "shengsuanyun", "deepseek", "cerebras",
 		"vivgrid", "volcengine", "vllm", "qwen", "qwen-intl", "qwen-international", "dashscope-intl",
 		"qwen-us", "dashscope-us", "mistral", "avian", "longcat", "modelscope", "novita",
@@ -214,8 +236,10 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			apiBase,
 			cfg.Proxy,
 			cfg.MaxTokensField,
+			userAgent,
 			cfg.RequestTimeout,
 			cfg.ExtraBody,
+			cfg.CustomHeaders,
 		), modelID, nil
 
 	case "minimax":
@@ -239,8 +263,10 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			apiBase,
 			cfg.Proxy,
 			cfg.MaxTokensField,
+			userAgent,
 			cfg.RequestTimeout,
 			extraBody,
+			cfg.CustomHeaders,
 		), modelID, nil
 
 	case "anthropic":
@@ -265,8 +291,10 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			apiBase,
 			cfg.Proxy,
 			cfg.MaxTokensField,
+			userAgent,
 			cfg.RequestTimeout,
 			cfg.ExtraBody,
+			cfg.CustomHeaders,
 		), modelID, nil
 
 	case "anthropic-messages":
@@ -281,6 +309,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		return anthropicmessages.NewProviderWithTimeout(
 			cfg.APIKey(),
 			apiBase,
+			userAgent,
 			cfg.RequestTimeout,
 		), modelID, nil
 
@@ -296,6 +325,7 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		return anthropicmessages.NewProviderWithTimeout(
 			cfg.APIKey(),
 			apiBase,
+			userAgent,
 			cfg.RequestTimeout,
 		), modelID, nil
 

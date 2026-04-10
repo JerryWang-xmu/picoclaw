@@ -241,5 +241,10 @@ func (c *CachedStore) Close() error {
 	return c.underlying.Close()
 }
 
+// ListSessions returns all known session keys from the underlying store.
+func (c *CachedStore) ListSessions() []string {
+	return c.underlying.ListSessions()
+}
+
 // Ensure CachedStore implements Store interface
 var _ Store = (*CachedStore)(nil)

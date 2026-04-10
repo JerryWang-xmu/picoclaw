@@ -96,6 +96,16 @@ func (m *mockStore) Close() error {
 	return nil
 }
 
+func (m *mockStore) ListSessions() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	keys := make([]string, 0, len(m.data))
+	for k := range m.data {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func (m *mockStore) GetGetCount() int {
 	return int(m.getCount.Load())
 }
